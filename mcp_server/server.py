@@ -10,6 +10,7 @@ from typing import Optional, Union
 from fastmcp import FastMCP
 from browser import ensure_tv, get_page, page_count
 import paper_tv
+import tv_utils
 from rules_engine import (
     load_system, load_all_systems, save_system,
     build_pane_registry, evaluate_system,
@@ -27,14 +28,6 @@ _watch_interval: int = 0
 mcp = FastMCP("tradingview")
 
 RULES_FILE = Path(__file__).parent.parent / "rules.json"
-TV_CHART   = "https://www.tradingview.com/chart/"
-
-# TV URL interval codes
-TF_CODES = {
-    "1m": "1",   "3m": "3",   "5m": "5",   "15m": "15",  "30m": "30",
-    "1h": "60",  "2h": "120", "4h": "240",
-    "1D": "D",   "1W": "W",   "1M": "M",
-}
 
 
 # ── persistence ────────────────────────────────────────────────────────────────
@@ -60,58 +53,10 @@ def _normalize(rules: Union[list, dict]) -> list[dict]:
     return [{"symbol": s, "tf": t} for s, t in rules.items()]
 
 
-# ── nav + read ─────────────────────────────────────────────────────────────────
-
-async def _navigate(page, symbol: str, tf: str):
-    """Navigate page to TV chart URL with symbol + interval baked in. Zero clicking."""
-    code = TF_CODES.get(tf, "D")
-    url  = f"{TV_CHART}?symbol={symbol}&interval={code}"
-    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    # Poll until title contains a real price (not TV's splash title).
-    # TV sets title to "SYMBOL PRICE ..." once chart renders — typically <2s.
-    ticker_root = symbol.split(":")[-1]  # "NASDAQ:AAPL" → "AAPL"
-    for _ in range(30):                  # max 6s (30 × 200ms)
-        title = await page.title()
-        if ticker_root in title and any(ch.isdigit() for ch in title):
-            break
-        await page.wait_for_timeout(200)
-
-
-async def _parse_title(page) -> dict:
-    """
-    TV sets <title> to live ticker: 'AAPL 270.22 ▲ +0.50%'
-    Returns {symbol, price, direction, change}.
-    """
-    title = await page.title()
-    parts = title.split()
-    result = {"symbol": parts[0] if parts else "?", "raw_title": title}
-    if len(parts) >= 2:
-        result["price"] = parts[1]
-    if len(parts) >= 4:
-        result["direction"] = parts[2]   # ▲ or ▼
-        result["change"]    = parts[3]
-    return result
-
-
-async def _read_ohlcv(page) -> dict:
-    """Read OHLCV from DOM header row (top 120px, text-only leaf nodes)."""
-    texts = await page.evaluate("""() =>
-        [...document.querySelectorAll('*')]
-            .filter(el => el.children.length === 0 && el.offsetParent !== null
-                       && el.getBoundingClientRect().top < 120)
-            .map(el => el.innerText?.trim())
-            .filter(t => t && t.length > 0)
-    """)
-    ohlcv: dict = {}
-    key_map = {"O": "open", "H": "high", "L": "low", "C": "close"}
-    last = None
-    for t in texts:
-        if t in key_map:
-            last = key_map[t]
-        elif last:
-            ohlcv[last] = t
-            last = None
-    return ohlcv
+# nav + read delegated to tv_utils (avoids circular import with paper_tv)
+_navigate   = tv_utils.navigate
+_parse_title = tv_utils.parse_title
+_read_ohlcv  = tv_utils.read_ohlcv
 
 
 # ── tools ──────────────────────────────────────────────────────────────────────
@@ -144,12 +89,57 @@ async def apply_layout(rules: Union[list, dict]) -> str:
 
 @mcp.tool()
 async def restore_layout() -> str:
-    """Re-open all panes from rules.json. Call after any restart or crash."""
+    """Re-open all panes from rules.json. Closes orphan tabs. Call after any restart or crash."""
+    from browser import close_orphan_tabs
     data  = _load_rules()
     panes = data.get("panes", [])
     if not panes:
         return "no saved panes — call apply_layout first"
-    return await apply_layout(panes)
+    result = await apply_layout(panes)
+    await close_orphan_tabs(len(panes))   # trim any excess tabs
+    return result
+
+
+@mcp.tool()
+async def health_check() -> dict:
+    """
+    Full system health: Chrome status, login state, tab count, watch loop, systems loaded.
+    Run this after any crash or unexpected behavior.
+    """
+    from browser import is_healthy, is_logged_in, page_count as _page_count, get_page
+    data   = _load_rules()
+    n_tabs = 0
+    chrome_ok   = False
+    login_ok    = False
+    login_urls  = []
+
+    try:
+        chrome_ok = await is_healthy()
+        if chrome_ok:
+            n_tabs = await _page_count()
+            for i in range(min(n_tabs, 5)):
+                try:
+                    page = await get_page(i)
+                    logged = await is_logged_in(page)
+                    login_urls.append({"pane": i, "url": page.url[:60], "logged_in": logged})
+                    if not logged:
+                        login_ok = False
+                except Exception:
+                    pass
+            login_ok = all(p["logged_in"] for p in login_urls)
+    except Exception as e:
+        chrome_ok = False
+
+    return {
+        "chrome":       "✓ healthy" if chrome_ok else "✗ down",
+        "login":        "✓ ok" if login_ok else "✗ session expired or unknown",
+        "tabs_open":    n_tabs,
+        "saved_panes":  len(data.get("panes", [])),
+        "watch_running": bool(_watch_task and not _watch_task.done()),
+        "watch_interval": _watch_interval if _watch_task and not _watch_task.done() else None,
+        "systems_loaded": [s["name"] for s in _active_systems],
+        "pages":        login_urls,
+    }
 
 
 @mcp.tool()
@@ -419,28 +409,75 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
 
     interval_seconds = max(5, min(3600, interval_seconds))
 
+    # ── crash-immune recovery ───────────────────────────────────────────────
+
+    async def _recover_chrome() -> bool:
+        """Recover Chrome + restore layout + reload systems. Returns True on success."""
+        from browser import recover, is_healthy
+        ok = await recover()
+        if not ok:
+            return False
+        # Re-open tabs
+        try:
+            await restore_layout()
+        except Exception as e:
+            print(f"[WATCH] restore_layout after recovery failed: {e}", flush=True)
+            return False
+        # Reload active systems (in-memory state was lost)
+        if _active_systems:
+            names = [s["name"] for s in _active_systems]
+            try:
+                await load_systems(names)
+            except Exception as e:
+                print(f"[WATCH] reload_systems after recovery failed: {e}", flush=True)
+        return await is_healthy()
+
+    # ── execution ───────────────────────────────────────────────────────────
+
     async def _execute_actions(r: dict):
+        from browser import is_logged_in, ensure_tv as _ensure_tv
         for action in r.get("actions", []):
-            parts  = action.split(":")
-            verb   = parts[0].lower()
-            qty    = float(parts[1]) if len(parts) > 1 else 1.0
-            symbol = r["symbol"]
-
-            # Resolve full TV symbol from active panes
+            parts     = action.split(":")
+            verb      = parts[0].lower()
+            qty       = float(parts[1]) if len(parts) > 1 else 1.0
             pane_data = _active_panes[r["pane"]] if r["pane"] < len(_active_panes) else {}
-            tv_symbol = pane_data.get("symbol", symbol)
+            tv_symbol = pane_data.get("symbol", r["symbol"])
 
-            if verb == "buy":
-                result = await paper_tv.place_order(tv_symbol, "buy", qty, r["pane"])
-                print(f"[WATCH] AUTO-BUY {tv_symbol} x{qty} → ok={result.get('ok')} {result.get('button_text','')}", flush=True)
-            elif verb == "sell":
-                result = await paper_tv.place_order(tv_symbol, "sell", qty, r["pane"])
-                print(f"[WATCH] AUTO-SELL {tv_symbol} x{qty} → ok={result.get('ok')} {result.get('button_text','')}", flush=True)
+            if verb not in ("buy", "sell"):
+                continue
+
+            # Login guard — never execute if session expired
+            try:
+                page = await _ensure_tv(r["pane"])
+                if not await is_logged_in(page):
+                    print(f"[WATCH] SKIP {verb} {tv_symbol} — TV session expired, login required", flush=True)
+                    continue
+            except Exception as e:
+                print(f"[WATCH] SKIP {verb} {tv_symbol} — page check failed: {e}", flush=True)
+                continue
+
+            result = await paper_tv.place_order(tv_symbol, verb, qty, r["pane"])
+            status = "✓" if result.get("ok") else "✗"
+            print(
+                f"[WATCH] {status} AUTO-{verb.upper()} {tv_symbol} x{qty} "
+                f"| {result.get('button_text') or result.get('error','')}",
+                flush=True,
+            )
+            if not result.get("ok"):
+                print(f"[WATCH] ORDER FAILED: {result}", flush=True)
+
+    # ── main loop ───────────────────────────────────────────────────────────
+
+    _consecutive_errors = 0
+    MAX_CONSECUTIVE     = 3    # Chrome recovery threshold
 
     async def _loop():
+        nonlocal _consecutive_errors
         while True:
             try:
                 results = await evaluate_rules()
+                _consecutive_errors = 0   # reset on success
+
                 triggered = [r for r in results if r.get("triggered")]
                 for r in triggered:
                     print(
@@ -452,16 +489,30 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
                         try:
                             await _execute_actions(r)
                         except Exception as e:
-                            print(f"[WATCH] auto_trade error: {e}", flush=True)
+                            print(f"[WATCH] execute error: {e}", flush=True)
+
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f"[WATCH] error: {e}", flush=True)
+                _consecutive_errors += 1
+                print(f"[WATCH] error ({_consecutive_errors}/{MAX_CONSECUTIVE}): {e}", flush=True)
+
+                if _consecutive_errors >= MAX_CONSECUTIVE:
+                    print("[WATCH] threshold reached — recovering Chrome...", flush=True)
+                    recovered = await _recover_chrome()
+                    if recovered:
+                        _consecutive_errors = 0
+                        print("[WATCH] recovered — resuming", flush=True)
+                    else:
+                        print("[WATCH] recovery failed — sleeping 60s before retry", flush=True)
+                        await asyncio.sleep(60)
+
             await asyncio.sleep(interval_seconds)
 
     if _watch_task and not _watch_task.done():
         _watch_task.cancel()
-    _watch_interval = interval_seconds
+    _watch_interval    = interval_seconds
+    _consecutive_errors = 0
     _watch_task = asyncio.create_task(_loop())
     return (
         f"watch started — interval={interval_seconds}s | "

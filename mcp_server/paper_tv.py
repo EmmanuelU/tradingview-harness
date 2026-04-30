@@ -2,7 +2,7 @@
 
 import asyncio
 from browser import ensure_tv
-from server import _navigate, _parse_title
+from tv_utils import navigate as _navigate, parse_title as _parse_title
 
 # Confirmed selectors (probed 2026-04-30)
 SEL_BUY_SIDE   = "[data-name='side-control-buy']"
