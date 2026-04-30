@@ -98,7 +98,8 @@ SingletonLock auto-cleared on fresh launch.
 ### Watch loop
 | Tool | Args | What it does |
 |---|---|---|
-| `start_watch` | `interval=30, auto_trade=False` | Eval loop. `auto_trade=True` → fires paper orders |
+| `preflight` | — | Verify all preconditions + pre-warm paper panel. Run before start_watch. |
+| `start_watch` | `interval=30, auto_trade=False` | Eval loop. `auto_trade=True` → fires paper orders. Min interval: 1s. |
 | `stop_watch` | — | Stop loop |
 | `watch_status` | — | Running, interval, sim_positions |
 
@@ -121,13 +122,16 @@ SingletonLock auto-cleared on fresh launch.
 | `get_rule_scores` | — | Win rate + avg P&L per rule |
 | `get_event_log` | `last_n=30` | System events log |
 
-## Turnkey startup
+## Turnkey startup (verified preflight)
 
 ```
 restore_layout()
 load_systems(["paper_momentum"])
+preflight()                        ← verify ALL preconditions, pre-warm paper panel
 start_watch(60, auto_trade=True)   ← infinite loop, reconciles positions from sim_log
 ```
+
+For 1m candle reaction: `start_watch(10, auto_trade=True)` — 10s polling, catches 1m closes reliably.
 
 ## Crash recovery (automatic)
 
@@ -160,16 +164,22 @@ SEL_BUY_BTN   = "[data-name='buy-order-button']"
 - `_sim_entries: dict[str, list]` — FIFO open entries for P&L matching, also rebuilt from sim_log
 - Cooldown bug fixed: `rule.update()` returns post-cooldown triggered value (pre-fix: cooldowns were ignored)
 
-## Paper trading execution benchmarks (2026-04-30, market closed)
+## Performance profile (2026-04-30, benchmarked live)
 
-| Operation | Latency |
-|---|---|
-| Price read (per pane) | ~283ms |
-| Paper order (buy or sell) | ~1370ms |
-| Popup dismissal | ~200ms |
-| Full cycle (2 panes, eval + orders) | ~3-4s |
+| Operation | Latency | Notes |
+|---|---|---|
+| Rule eval (Python) | 0.13ms | Negligible at any interval |
+| Price read (parallel, N panes) | ~283ms | Parallel via asyncio.gather — same for 1 or 10 panes |
+| Popup dismiss (per pane) | ~200ms | Adaptive: skipped when clean 10+ cycles |
+| Paper order (buy or sell) | ~1370ms | Irreducible TV DOM round-trip |
+| Cycle without order | ~500ms | With adaptive popup skip after warmup |
+| Cycle with order | ~1900ms | Price + order |
 
-At 1D/4h/1h timeframes: all latencies irrelevant.
+**Minimum safe interval: 5s** (warns below 5s, allows down to 1s)
+**Recommended for 1m candles: 10s polling** — catches close within 10s of candle end
+**1D/4h/1h: 60s interval** — all latencies irrelevant
+
+Watch loop cycle timing: `sleep = max(0, interval - elapsed)` — no drift at any interval.
 
 ## Backtest
 
