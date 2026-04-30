@@ -9,6 +9,7 @@ from typing import Optional, Union
 
 from fastmcp import FastMCP
 from browser import ensure_tv, get_page, page_count
+import paper_tv
 from rules_engine import (
     load_system, load_all_systems, save_system,
     build_pane_registry, evaluate_system,
@@ -405,23 +406,53 @@ async def reload_systems() -> str:
 
 
 @mcp.tool()
-async def start_watch(interval_seconds: int = 30) -> str:
+async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> str:
     """
     Start background rule evaluation loop. Runs evaluate_rules() every N seconds.
-    Logs triggered rules to stdout. Replaces any running watch.
+    Logs triggered rules. Replaces any running watch.
+
     interval_seconds: 5–3600 (default 30)
+    auto_trade: if True, rules with action 'buy'/'sell' auto-execute paper orders
+                e.g. action 'buy:2' → buy 2 units; bare 'buy' → buy 1 unit
     """
     global _watch_task, _watch_interval
+
     interval_seconds = max(5, min(3600, interval_seconds))
+
+    async def _execute_actions(r: dict):
+        for action in r.get("actions", []):
+            parts  = action.split(":")
+            verb   = parts[0].lower()
+            qty    = float(parts[1]) if len(parts) > 1 else 1.0
+            symbol = r["symbol"]
+
+            # Resolve full TV symbol from active panes
+            pane_data = _active_panes[r["pane"]] if r["pane"] < len(_active_panes) else {}
+            tv_symbol = pane_data.get("symbol", symbol)
+
+            if verb == "buy":
+                result = await paper_tv.place_order(tv_symbol, "buy", qty, r["pane"])
+                print(f"[WATCH] AUTO-BUY {tv_symbol} x{qty} → ok={result.get('ok')} {result.get('button_text','')}", flush=True)
+            elif verb == "sell":
+                result = await paper_tv.place_order(tv_symbol, "sell", qty, r["pane"])
+                print(f"[WATCH] AUTO-SELL {tv_symbol} x{qty} → ok={result.get('ok')} {result.get('button_text','')}", flush=True)
 
     async def _loop():
         while True:
             try:
                 results = await evaluate_rules()
                 triggered = [r for r in results if r.get("triggered")]
-                if triggered:
-                    for r in triggered:
-                        print(f"[WATCH] TRIGGERED {r['rule_id']} | {r['symbol']} | {r['condition']} | val={r['value']}", flush=True)
+                for r in triggered:
+                    print(
+                        f"[WATCH] TRIGGERED {r['rule_id']} | {r['symbol']} "
+                        f"| {r['condition']} | val={r['value']}",
+                        flush=True,
+                    )
+                    if auto_trade:
+                        try:
+                            await _execute_actions(r)
+                        except Exception as e:
+                            print(f"[WATCH] auto_trade error: {e}", flush=True)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -432,7 +463,10 @@ async def start_watch(interval_seconds: int = 30) -> str:
         _watch_task.cancel()
     _watch_interval = interval_seconds
     _watch_task = asyncio.create_task(_loop())
-    return f"watch started — interval={interval_seconds}s | systems={[s['name'] for s in _active_systems]}"
+    return (
+        f"watch started — interval={interval_seconds}s | "
+        f"auto_trade={auto_trade} | systems={[s['name'] for s in _active_systems]}"
+    )
 
 
 @mcp.tool()
@@ -452,6 +486,90 @@ async def watch_status() -> dict:
     """Check if background watch is running and its interval."""
     running = bool(_watch_task and not _watch_task.done())
     return {"running": running, "interval_seconds": _watch_interval if running else None}
+
+
+# ── paper trading DOM probe ────────────────────────────────────────────────────
+
+@mcp.tool()
+async def probe_paper_dom(pane: int = 0) -> dict:
+    """
+    Live DOM probe for paper trading panel — account, positions, order entry selectors.
+    Run after connecting Paper Trading broker in TV.
+    """
+    page = await ensure_tv(pane)
+    await page.keyboard.press("Escape")
+    await page.wait_for_timeout(300)
+
+    return await page.evaluate("""() => {
+        const qa = sel => [...document.querySelectorAll(sel)];
+
+        const panelTabs = qa('[data-name="round-tabs-buttons"] button, [data-name="round-tabs-anchors"] button')
+            .filter(el => el.offsetParent !== null)
+            .map(el => ({text: el.innerText?.trim(), dn: el.getAttribute('data-name')}));
+
+        const bottomDataNames = qa('[data-name]')
+            .filter(el => {
+                const r = el.getBoundingClientRect();
+                return r.top > window.innerHeight * 0.55 && el.offsetParent !== null && el.innerText?.trim();
+            })
+            .map(el => ({name: el.getAttribute('data-name'), text: el.innerText?.trim().slice(0,80)}));
+
+        const inputs = qa('input')
+            .filter(el => el.offsetParent !== null)
+            .map(el => ({name: el.name, type: el.type, ph: el.placeholder, val: el.value}));
+
+        const bottomText = qa('*')
+            .filter(el => {
+                const r = el.getBoundingClientRect();
+                return el.children.length === 0 && el.offsetParent !== null
+                    && r.top > window.innerHeight * 0.55 && el.innerText?.trim().length > 0;
+            })
+            .map(el => el.innerText?.trim())
+            .filter(t => t.length < 100)
+            .slice(0, 50);
+
+        const orderForm = qa('[class*="orderEntry"],[class*="OrderEntry"],[class*="order-entry"],[class*="orderTicket"],[class*="tradePanel"],[class*="brokerPage"]')
+            .filter(el => el.offsetParent !== null)
+            .map(el => ({cls: el.className.slice(0,80), text: el.innerText?.trim().slice(0,200)}));
+
+        return { panelTabs, bottomDataNames, inputs, bottomText, orderForm };
+    }""")
+
+
+# ── paper trading tools ────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def paper_buy(symbol: str, qty: float = 1, pane: int = 0) -> dict:
+    """
+    Place a paper BUY order via TradingView Paper Trading (DOM-native, zero deps).
+    symbol: TV format — 'NASDAQ:AAPL' | 'BINANCE:BTCUSDT'
+    qty: shares/units (default 1)
+    pane: chart tab index (default 0)
+    """
+    return await paper_tv.place_order(symbol, "buy", qty, pane)
+
+
+@mcp.tool()
+async def paper_sell(symbol: str, qty: float = 1, pane: int = 0) -> dict:
+    """
+    Place a paper SELL order via TradingView Paper Trading (DOM-native, zero deps).
+    symbol: TV format — 'NASDAQ:AAPL' | 'BINANCE:BTCUSDT'
+    qty: shares/units (default 1)
+    pane: chart tab index (default 0)
+    """
+    return await paper_tv.place_order(symbol, "sell", qty, pane)
+
+
+@mcp.tool()
+async def get_positions(pane: int = 0) -> list:
+    """Open paper positions from TradingView paper trading panel."""
+    return await paper_tv.get_positions(pane)
+
+
+@mcp.tool()
+async def get_account(pane: int = 0) -> dict:
+    """Account metrics from TradingView paper trading panel (equity, P&L, etc)."""
+    return await paper_tv.get_account_metrics(pane)
 
 
 if __name__ == "__main__":

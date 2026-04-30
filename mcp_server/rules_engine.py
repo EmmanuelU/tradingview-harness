@@ -66,7 +66,7 @@ CURRENT_VERSION = 2
 
 VALID_OPS = frozenset({">", "<", ">=", "<=", "==", "!=", "crosses_above", "crosses_below"})
 VALID_LOGICS = frozenset({"AND", "OR", "NOT"})
-VALID_ACTIONS = frozenset({"log", "alert", "screenshot"})
+VALID_ACTIONS = frozenset({"log", "alert", "screenshot", "buy", "sell"})
 DERIVED_FIELDS = frozenset({"range", "body", "wick_upper", "wick_lower"})
 RAW_FIELDS     = frozenset({"open", "high", "low", "close", "price", "change_pct"})
 ALL_FIELDS     = RAW_FIELDS | DERIVED_FIELDS
@@ -142,7 +142,8 @@ def _validate_rule(rule: dict) -> list[str]:
         errors.append(str(e))
 
     for action in rule.get("actions", []):
-        if action not in VALID_ACTIONS:
+        verb = action.split(":")[0]  # "buy:2" → "buy"
+        if verb not in VALID_ACTIONS:
             errors.append(f"unknown action {action!r} — valid: {sorted(VALID_ACTIONS)}")
 
     cooldown = rule.get("cooldown_evals", 0)

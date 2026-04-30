@@ -1,0 +1,53 @@
+{
+  "version": 2,
+  "name": "paper_momentum",
+  "description": "Paper trading — buy AAPL on green day above 270, buy BTC above 75k. Auto-executes when watch auto_trade=true.",
+  "panes": [
+    {"symbol": "NASDAQ:AAPL",     "tf": "1D"},
+    {"symbol": "BINANCE:BTCUSDT", "tf": "4h"}
+  ],
+  "rules": [
+    {
+      "id": "paper_aapl_long",
+      "name": "AAPL long — green day AND above 270",
+      "pane_symbol": "NASDAQ:AAPL",
+      "pane_tf": "1D",
+      "conditions": {
+        "logic": "AND",
+        "items": [
+          {"field": "close", "op": ">", "field2": "open"},
+          {"field": "close", "op": ">", "value": 270}
+        ]
+      },
+      "actions": ["log", "buy:1"],
+      "cooldown_evals": 3
+    },
+    {
+      "id": "paper_aapl_exit",
+      "name": "AAPL exit — close below open (red day)",
+      "pane_symbol": "NASDAQ:AAPL",
+      "pane_tf": "1D",
+      "condition": {"field": "close", "op": "<", "field2": "open"},
+      "actions": ["log", "sell:1"],
+      "cooldown_evals": 3
+    },
+    {
+      "id": "paper_btc_long",
+      "name": "BTC long — above 75k",
+      "pane_symbol": "BINANCE:BTCUSDT",
+      "pane_tf": "4h",
+      "condition": {"field": "close", "op": ">", "value": 75000},
+      "actions": ["log", "buy:0.001"],
+      "cooldown_evals": 5
+    },
+    {
+      "id": "paper_btc_exit",
+      "name": "BTC exit — below 74k",
+      "pane_symbol": "BINANCE:BTCUSDT",
+      "pane_tf": "4h",
+      "condition": {"field": "close", "op": "<", "value": 74000},
+      "actions": ["log", "sell:0.001"],
+      "cooldown_evals": 5
+    }
+  ]
+}
