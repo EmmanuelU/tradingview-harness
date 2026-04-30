@@ -43,18 +43,44 @@ get_all_prices()        # verify all panes live
 
 ## Tools
 
+### Layout
+
 | Tool | Description |
 |---|---|
 | `apply_layout(panes)` | Open N tabs, set each symbol — saves to `rules.json` |
 | `restore_layout()` | Re-apply `rules.json` after restart or crash |
 | `set_symbol(symbol, tf, pane)` | Set one pane, patch rules |
-| `get_price(pane)` | Live price + OHLCV from DOM |
-| `get_all_prices()` | Price from every open pane |
-| `screenshot(pane)` | Base64 PNG — bot sees what you see |
-| `screenshot_all()` | Screenshot every pane |
-| `add_indicator(name, pane)` | Add RSI, MACD, EMA, etc. |
 | `list_panes()` | Tab count + saved layout |
 | `get_status()` | Health check |
+
+### Price
+
+| Tool | Description |
+|---|---|
+| `get_price(pane)` | Live price + OHLCV from DOM |
+| `get_all_prices()` | Price from every open pane simultaneously |
+| `screenshot(pane, label)` | Base64 PNG — bot sees what you see |
+| `screenshot_all()` | Screenshot every pane |
+| `add_indicator(name, pane)` | Add RSI, MACD, EMA, etc. |
+
+### Rule Systems
+
+| Tool | Description |
+|---|---|
+| `load_systems(names)` | Load systems from `systems/*.json`. Deduplicates panes across systems. Omit `names` to load all. |
+| `evaluate_rules(system_name)` | Fetch live prices (parallel) → evaluate all rules → save state. Omit `system_name` for all. |
+| `get_full_picture()` | Full state snapshot: every rule + system-level stats (trigger_rate, eval_count) |
+| `get_rule_state(system_name, rule_id)` | State + full history for one rule |
+| `list_systems()` | Systems on disk vs loaded |
+| `reload_systems()` | Hot-reload active systems from disk (pick up rule edits) |
+
+### Background Watch
+
+| Tool | Description |
+|---|---|
+| `start_watch(interval_seconds)` | Evaluate rules every N seconds in background. Logs triggers to stdout. Default 30s. |
+| `stop_watch()` | Stop background watch loop |
+| `watch_status()` | Check if watch is running and its interval |
 
 ## Layout rules
 

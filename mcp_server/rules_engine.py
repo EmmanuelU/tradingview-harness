@@ -53,7 +53,6 @@ Unknown ops/fields: ValidationError at load, not silent skip.
 
 import json
 import operator
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -311,7 +310,8 @@ class Rule:
         if self._python_fn:
             try:
                 return bool(self._python_fn(price, prev))
-            except Exception:
+            except Exception as e:
+                print(f"[rules] python rule {self.id!r} error: {e}", flush=True)
                 return None
         if self._conditions:
             return self._eval_multi(self._conditions, price, prev)
@@ -360,11 +360,13 @@ class Rule:
 
     def to_dict(self) -> dict:
         """Serialise back to JSON-compatible dict (for saving to system file)."""
+        state_out = {k: v for k, v in self.state.items() if k != "last_price"}
         d: dict = {
             "id": self.id, "name": self.name,
             "pane_symbol": self.pane_symbol, "pane_tf": self.pane_tf,
             "actions": self.actions, "cooldown_evals": self.cooldown,
-            "state": self.state,
+            "_cooldown_remaining": self._cooldown_remaining,
+            "state": state_out,
         }
         if self._condition:   d["condition"]  = self._condition
         if self._conditions:  d["conditions"] = self._conditions
@@ -405,6 +407,8 @@ def rule_from_dict(raw: dict) -> Rule:
     # Restore persisted state
     if "state" in raw:
         rule.state.update(raw["state"])
+    # Restore cooldown counter so active cooldowns survive save/reload
+    rule._cooldown_remaining = raw.get("_cooldown_remaining", 0)
     return rule
 
 
