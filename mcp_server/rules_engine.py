@@ -458,10 +458,12 @@ def save_system(data: dict):
     rules_out = [r.to_dict() for r in data.get("_rules", [])]
     out = {k: v for k, v in data.items() if not k.startswith("_")}
     out["rules"] = rules_out
-    # stats persisted if present
     if "stats" in data:
         out["stats"] = data["stats"]
-    path.write_text(json.dumps(out, indent=2))
+    # Atomic write — prevent corruption on crash mid-write
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(out, indent=2))
+    tmp.replace(path)
 
 
 def load_all_systems() -> list[dict]:

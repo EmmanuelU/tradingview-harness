@@ -405,6 +405,91 @@ async def dismiss_popups(pane: int = 0) -> dict:
 
 
 @mcp.tool()
+async def preflight() -> dict:
+    """
+    Verify ALL preconditions before start_watch. Run this after restore_layout + load_systems.
+    Pre-warms paper panel. Returns pass/fail per check with fix instructions.
+    All checks must pass before start_watch is safe.
+    """
+    from browser import is_healthy, is_logged_in
+    report: dict = {"pass": True, "checks": []}
+
+    def chk(name: str, ok: bool, detail: str = "", fix: str = ""):
+        report["checks"].append({"check": name, "ok": ok, "detail": detail, "fix": fix})
+        if not ok:
+            report["pass"] = False
+
+    # 1. Chrome
+    chrome_ok = await is_healthy()
+    chk("chrome_healthy", chrome_ok, fix="call restore_layout()")
+    if not chrome_ok:
+        report["ready"] = False
+        return report
+
+    # 2. TV login on all panes
+    n_tabs = await page_count()
+    login_ok = True
+    for i in range(min(n_tabs, len(_active_panes) or n_tabs)):
+        try:
+            page   = await get_page(i)
+            logged = await is_logged_in(page)
+            if not logged:
+                login_ok = False
+                chk(f"login_pane_{i}", False, page.url[:60], fix="log in to TradingView in Chrome")
+        except Exception as e:
+            chk(f"login_pane_{i}", False, str(e))
+            login_ok = False
+    if login_ok:
+        chk("tv_login", True, f"{n_tabs} tabs all logged in")
+
+    # 3. Systems loaded
+    chk("systems_loaded", bool(_active_systems),
+        detail=str([s["name"] for s in _active_systems]),
+        fix="call load_systems(['paper_momentum'])")
+
+    # 4. Panes on correct symbols + price readable
+    pane_errors = []
+    for i, expected in enumerate(_active_panes):
+        try:
+            page     = await ensure_tv(i)
+            ticker   = await _parse_title(page)
+            sym_root = expected["symbol"].split(":")[-1]
+            if sym_root not in (await page.title()):
+                pane_errors.append(f"pane {i}: expected {sym_root} — got {ticker.get('symbol','?')}")
+            elif not ticker.get("price"):
+                pane_errors.append(f"pane {i}: {sym_root} loaded but no price in title")
+        except Exception as e:
+            pane_errors.append(f"pane {i}: {e}")
+    chk("panes_correct_and_priced", not pane_errors,
+        detail="; ".join(pane_errors) if pane_errors else f"{len(_active_panes)} panes OK",
+        fix="call restore_layout() or load_systems()")
+
+    # 5. Paper panel pre-warm (only panes with buy/sell actions)
+    if _active_systems:
+        trade_pane_idxs = {
+            rule.pane_index for s in _active_systems
+            for rule in s.get("_rules", [])
+            if any(a.split(":")[0] in ("buy", "sell") for a in rule.actions)
+        }
+        panel_errors = []
+        for i in trade_pane_idxs:
+            try:
+                page      = await ensure_tv(i)
+                connected = await paper_tv._ensure_paper_connected(page)
+                if not connected:
+                    panel_errors.append(f"pane {i}: panel did not connect")
+            except Exception as e:
+                panel_errors.append(f"pane {i}: {e}")
+        chk("paper_panel_connected", not panel_errors,
+            detail="; ".join(panel_errors) if panel_errors else f"pre-warmed panes {sorted(trade_pane_idxs)}",
+            fix="open TV Paper Trading broker manually once, then re-run preflight()")
+
+    report["ready"] = report["pass"]
+    report["next"]  = "start_watch(60, auto_trade=True)" if report["pass"] else "fix failed checks above"
+    return report
+
+
+@mcp.tool()
 async def get_status() -> str:
     """Quick health check: tab count + saved layout."""
     data  = _load_rules()
@@ -560,7 +645,9 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
     """
     global _watch_task, _watch_interval
 
-    interval_seconds = max(5, min(3600, interval_seconds))
+    interval_seconds = max(1, min(3600, interval_seconds))
+    if interval_seconds < 5:
+        print(f"[WATCH] WARNING: interval={interval_seconds}s — price read ~283ms/pane, order ~1370ms", flush=True)
 
     # ── crash-immune recovery ───────────────────────────────────────────────
 
@@ -669,21 +756,49 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
 
     async def _loop():
         nonlocal _consecutive_errors
-        _reconcile_positions()   # rebuild from sim_log on every (re)start
+        _reconcile_positions()
         print(f"[WATCH] positions reconciled: {_sim_positions}", flush=True)
         _log_event("watch_start", f"interval={interval_seconds}s auto_trade={auto_trade} systems={[s['name'] for s in _active_systems]}")
+
+        # Pre-warm paper panel on all panes with buy/sell rules — eliminates cold-start latency
+        if auto_trade:
+            trade_panes = {
+                r["pane"] for s in _active_systems
+                for r in s.get("_rules", [])
+                if any(a.split(":")[0] in ("buy","sell") for a in r.actions)
+            }
+            for i in trade_panes:
+                try:
+                    page = await ensure_tv(i)
+                    await paper_tv._ensure_paper_connected(page)
+                    print(f"[WATCH] paper panel pre-warmed pane {i}", flush=True)
+                except Exception as e:
+                    print(f"[WATCH] pre-warm pane {i} failed: {e}", flush=True)
+
+        # Adaptive popup dismiss: skip if clean for 10 consecutive cycles
+        _popup_clean = 0
+        POPUP_SKIP_AFTER = 10
+
         while True:
+            cycle_start = asyncio.get_event_loop().time()
             try:
-                # Dismiss any TV popups that could block DOM reads
-                for i in range(len(_active_panes)):
-                    try:
-                        page = await ensure_tv(i)
-                        await tv_utils.dismiss_popups(page)
-                    except Exception:
-                        pass
+                # Popup dismiss — adaptive: skip if no popups for 10 cycles
+                if _popup_clean < POPUP_SKIP_AFTER:
+                    found_any = False
+                    for i in range(len(_active_panes)):
+                        try:
+                            page = await ensure_tv(i)
+                            dismissed = await tv_utils.dismiss_popups(page)
+                            if dismissed:
+                                found_any = True
+                        except Exception:
+                            pass
+                    _popup_clean = 0 if found_any else (_popup_clean + 1)
+                else:
+                    _popup_clean = 0   # reset counter — re-check next cycle
 
                 results = await evaluate_rules()
-                _consecutive_errors = 0   # reset on success
+                _consecutive_errors = 0
 
                 triggered = [r for r in results if r.get("triggered")]
                 for r in triggered:
@@ -712,14 +827,19 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
                     recovered = await _recover_chrome()
                     if recovered:
                         _consecutive_errors = 0
+                        _popup_clean = 0   # reset after recovery — popups likely
                         print("[WATCH] recovered — resuming", flush=True)
                         _log_event("chrome_recovery_ok", "")
                     else:
-                        print("[WATCH] recovery failed — sleeping 60s before retry", flush=True)
+                        print("[WATCH] recovery failed — sleeping 60s", flush=True)
                         _log_event("chrome_recovery_failed", "sleeping 60s")
                         await asyncio.sleep(60)
 
-            await asyncio.sleep(interval_seconds)
+            # Cycle timing correction — subtract actual execution time from sleep
+            elapsed   = asyncio.get_event_loop().time() - cycle_start
+            sleep_for = max(0.0, interval_seconds - elapsed)
+            _log_event("cycle_tick", f"elapsed={elapsed:.3f}s sleep={sleep_for:.3f}s")
+            await asyncio.sleep(sleep_for)
 
     if _watch_task and not _watch_task.done():
         _watch_task.cancel()
