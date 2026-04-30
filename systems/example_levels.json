@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "name": "example_levels",
+  "description": "Key level watches across assets",
+  "panes": [
+    {
+      "symbol": "NASDAQ:AAPL",
+      "tf": "1D"
+    },
+    {
+      "symbol": "FX:EURUSD",
+      "tf": "1h"
+    }
+  ],
+  "rules": [
+    {
+      "id": "aapl_below_260",
+      "name": "AAPL breakdown below 260",
+      "pane_symbol": "NASDAQ:AAPL",
+      "pane_tf": "1D",
+      "condition": {
+        "field": "close",
+        "op": "<",
+        "value": 260
+      },
+      "actions": [
+        "log",
+        "alert",
+        "screenshot"
+      ],
+      "state": {
+        "triggered": false,
+        "last_value": 270.22,
+        "prev_value": null,
+        "trigger_count": 0,
+        "last_triggered": null,
+        "last_checked": "2026-04-30T03:13:45.205660+00:00",
+        "history": [
+          {
+            "ts": "2026-04-30T03:13:45.205741+00:00",
+            "value": 270.22,
+            "triggered": false
+          }
+        ]
+      },
+      "_pane_index": 0
+    },
+    {
+      "id": "eurusd_above_1_17",
+      "name": "EURUSD above 1.17",
+      "pane_symbol": "FX:EURUSD",
+      "pane_tf": "1h",
+      "condition": {
+        "field": "close",
+        "op": ">",
+        "value": 1.17
+      },
+      "actions": [
+        "log"
+      ],
+      "state": {
+        "triggered": true,
+        "last_value": 1.17515,
+        "prev_value": null,
+        "trigger_count": 1,
+        "last_triggered": "2026-04-30T03:13:45.205816+00:00",
+        "last_checked": "2026-04-30T03:13:45.205799+00:00",
+        "history": [
+          {
+            "ts": "2026-04-30T03:13:45.205826+00:00",
+            "value": 1.17515,
+            "triggered": true
+          }
+        ]
+      },
+      "_pane_index": 2
+    },
+    {
+      "id": "aapl_wick_rejection",
+      "name": "AAPL high > close + 2 (upper wick)",
+      "pane_symbol": "NASDAQ:AAPL",
+      "pane_tf": "1D",
+      "condition": {
+        "field": "high",
+        "op": ">",
+        "value": 272
+      },
+      "actions": [
+        "log"
+      ],
+      "state": {
+        "triggered": false,
+        "last_value": 271.04,
+        "prev_value": null,
+        "trigger_count": 0,
+        "last_triggered": null,
+        "last_checked": "2026-04-30T03:13:45.205883+00:00",
+        "history": [
+          {
+            "ts": "2026-04-30T03:13:45.205900+00:00",
+            "value": 271.04,
+            "triggered": false
+          }
+        ]
+      },
+      "_pane_index": 0
+    }
+  ]
+}

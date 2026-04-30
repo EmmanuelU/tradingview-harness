@@ -1,4 +1,4 @@
-"""TradingView MCP — unlimited panes, URL-based nav, DOM price, full persistence."""
+"""TradingView MCP — unlimited panes, URL-based nav, DOM price, rules engine."""
 
 import asyncio
 import base64
@@ -9,6 +9,15 @@ from typing import Optional, Union
 
 from fastmcp import FastMCP
 from browser import ensure_tv, get_page, page_count
+from rules_engine import (
+    load_system, load_all_systems, save_system,
+    build_pane_registry, evaluate_system,
+    get_rule_history, full_picture, list_system_files,
+)
+
+# In-process registry — rebuilt each load_systems call
+_active_systems: list[dict] = []
+_active_panes:   list[dict] = []
 
 mcp = FastMCP("tradingview")
 
@@ -257,6 +266,124 @@ async def get_status() -> str:
         lines.append(f"  [{i}] {p.get('symbol')} @ {p.get('tf')}")
     lines.append(f"last_applied: {data.get('last_applied')}")
     return "\n".join(lines)
+
+
+# ── rule system tools ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def load_systems(names: Optional[list] = None) -> str:
+    """
+    Load rule systems. Deduplicates panes across all systems.
+    Opens exactly the tabs needed (shared panes = shared tab).
+
+    names: list of system names (without .json) — or omit to load ALL systems.
+    Example: load_systems(["example_momentum", "example_levels"])
+    """
+    global _active_systems, _active_panes
+
+    if names:
+        systems = [load_system(n) for n in names]
+    else:
+        systems = load_all_systems()
+
+    if not systems:
+        return "no systems found in systems/"
+
+    _active_panes   = build_pane_registry(systems)
+    _active_systems = systems
+
+    # Open exactly the deduplicated tabs
+    results = []
+    for i, pane in enumerate(_active_panes):
+        page = await ensure_tv(i)
+        await _navigate(page, pane["symbol"], pane["tf"])
+        ticker = await _parse_title(page)
+        results.append(f"  [{i}] {pane['symbol']} @ {pane['tf']} | {ticker.get('price','?')}")
+
+    _save_rules(_active_panes)
+
+    sys_names = [s["name"] for s in _active_systems]
+    return (
+        f"systems loaded: {sys_names}\n"
+        f"panes (deduped): {len(_active_panes)}\n"
+        + "\n".join(results)
+    )
+
+
+@mcp.tool()
+async def evaluate_rules(system_name: Optional[str] = None) -> list:
+    """
+    Evaluate all rules against live DOM prices. Saves state back to system files.
+    system_name: evaluate one system only — or omit for all loaded systems.
+    Returns list of rule results with triggered status.
+    """
+    global _active_systems, _active_panes
+
+    if not _active_systems:
+        return [{"error": "no systems loaded — call load_systems first"}]
+
+    # Read live prices from all panes
+    prices_by_pane: dict[int, dict] = {}
+    for i in range(len(_active_panes)):
+        try:
+            page   = await ensure_tv(i)
+            ticker = await _parse_title(page)
+            ohlcv  = await _read_ohlcv(page)
+            prices_by_pane[i] = {**ticker, **ohlcv}
+        except Exception as e:
+            prices_by_pane[i] = {}
+
+    # Evaluate
+    all_results = []
+    for sys in _active_systems:
+        if system_name and sys["name"] != system_name:
+            continue
+        results = evaluate_system(sys, prices_by_pane)
+        save_system(sys)
+        all_results.extend(results)
+
+    return all_results
+
+
+@mcp.tool()
+async def get_full_picture() -> dict:
+    """
+    Full state snapshot across all loaded systems.
+    Shows every rule: triggered, count, last value, last triggered, history length.
+    """
+    if not _active_systems:
+        return {"error": "no systems loaded — call load_systems first"}
+    return full_picture(_active_systems)
+
+
+@mcp.tool()
+async def get_rule_state(system_name: str, rule_id: str) -> dict:
+    """
+    Full state + history for one specific rule.
+    system_name: e.g. 'example_momentum'
+    rule_id: e.g. 'aapl_above_270'
+    """
+    for sys in _active_systems:
+        if sys["name"] == system_name:
+            return get_rule_history(sys, rule_id)
+    return {"error": f"system {system_name!r} not loaded"}
+
+
+@mcp.tool()
+async def list_systems() -> dict:
+    """List all system files on disk and which are currently loaded."""
+    on_disk  = [f.stem for f in list_system_files()]
+    loaded   = [s["name"] for s in _active_systems]
+    return {"on_disk": on_disk, "loaded": loaded, "panes": _active_panes}
+
+
+@mcp.tool()
+async def reload_systems() -> str:
+    """Hot-reload all currently active systems from disk (picks up rule edits)."""
+    if not _active_systems:
+        return "no systems loaded"
+    names = [s["name"] for s in _active_systems]
+    return await load_systems(names)
 
 
 if __name__ == "__main__":
