@@ -108,6 +108,71 @@ SEL_BUY_BTN   = "[data-name='buy-order-button']"
 - Selector args passed as JS array — never interpolate CSS selectors with single quotes into JS strings
 - `_ensure_paper_connected` checks for `place-and-modify-button` existence
 
+## Data shapes (exact — no guessing)
+
+### Price dict (DOM read, all values are STRINGS)
+```python
+{"pane": int, "symbol": str,  # short "AAPL" not "NASDAQ:AAPL"
+ "price": str, "direction": str, "change": str,
+ "open": str, "high": str, "low": str, "close": str}
+```
+Convert to float before any broker API: `float(str(v).replace(",",""))`
+
+### Rule trigger result (what executor receives)
+```python
+{"rule_id": str, "name": str, "pane": int,
+ "symbol": str,      # short — resolve via _active_panes[pane]["symbol"]
+ "triggered": bool, "value": float, "condition": str,
+ "count": int, "actions": list[str]}  # ["log","buy:1","sell:0.001"]
+```
+
+### OrderRequest / OrderResult (not yet built — needed before live brokers)
+```python
+@dataclass
+class OrderRequest:
+    symbol: str       # TV full "NASDAQ:AAPL" — executor normalizes per broker
+    side: str         # "buy" | "sell"
+    qty: float
+    order_type: str   # "market" | "limit"
+    price: float      # rule last_value; None for market
+    rule_id: str
+    pane: int
+
+@dataclass
+class OrderResult:
+    ok: bool
+    order_id: str     # None for paper_tv
+    fill_price: float
+    filled_qty: float
+    status: str       # "filled"|"pending"|"rejected"|"error"
+    broker: str       # "paper_tv"|"alpaca"|"binance"|"oanda"
+    timestamp: str
+    raw: dict
+```
+
+## Broker architecture (designed, not yet built)
+
+```
+Signal (done) → Risk layer (missing) → Executor abstraction (missing)
+                                            ├── paper_tv.py       ← done
+                                            ├── broker_alpaca.py  ← stocks
+                                            ├── broker_binance.py ← crypto
+                                            └── broker_oanda.py   ← forex
+```
+Mode: `TRADE_MODE=paper|live` env var  
+Interface: `executor.execute(OrderRequest) → OrderResult`  
+Rules unchanged between paper and live — only executor swaps.
+
+## New broker probe protocol (live brokers via TV panel)
+
+1. Connect broker in TV Trade panel (manual once)
+2. `probe_paper_dom(pane=0)` → capture all `data-name` elements
+3. `dispatch_event('click')` on buy button → open order form
+4. Re-probe: map inputs, buttons to OrderRequest fields
+5. Verify React native setter pattern (usually required)
+6. Add `broker_X.py` with same `place_order(symbol, side, qty, pane)` interface
+7. Confirm selectors are `data-name`/`id` — reject class-hash selectors
+
 ## Rule system schema (v2)
 
 ```json
