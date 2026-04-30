@@ -201,6 +201,7 @@ class Rule:
         "triggered": False,
         "last_value": None,
         "prev_value": None,
+        "last_price": None,   # full OHLCV dict — used as prev on next eval
         "trigger_count": 0,
         "last_triggered": None,
         "last_checked": None,
@@ -336,6 +337,7 @@ class Rule:
 
         s["prev_value"]  = s["last_value"]
         s["last_value"]  = val
+        s["last_price"]  = price   # full OHLCV — used as prev on the NEXT eval
         s["last_checked"] = now
 
         if triggered is None:
@@ -510,17 +512,24 @@ def _cond_str(rule: "Rule") -> str:
 
 def _update_system_stats(system: dict, results: list[dict]):
     """Accumulate system-level performance stats. Self-improvement loop data."""
-    stats = system.setdefault("stats", {
-        "eval_count": 0, "total_triggers": 0, "skipped": 0,
-        "trigger_rate": 0.0, "last_eval": None,
-    })
+    stats = system.setdefault("stats", {})
+    # Forward-compat: add any missing keys (handles old stats blobs on disk)
+    stats.setdefault("eval_count", 0)
+    stats.setdefault("total_triggers", 0)
+    stats.setdefault("skipped", 0)
+    stats.setdefault("evaluatable_evals", 0)
+    stats.setdefault("trigger_rate", 0.0)
+    stats.setdefault("last_eval", None)
     stats["eval_count"] += 1
-    fired    = sum(1 for r in results if r.get("triggered") is True)
-    skipped  = sum(1 for r in results if "skip" in r)
-    stats["total_triggers"] += fired
-    stats["skipped"] += skipped
+    fired      = sum(1 for r in results if r.get("triggered") is True)
+    skipped    = sum(1 for r in results if "skip" in r)
+    evaluatable = len(results) - skipped    # rules that actually ran
+    stats["total_triggers"]    += fired
+    stats["skipped"]           += skipped
+    stats["evaluatable_evals"] += evaluatable
+    # rate = triggers / opportunities (excludes skipped)
     stats["trigger_rate"] = round(
-        stats["total_triggers"] / max(stats["eval_count"] * max(len(results), 1), 1), 4
+        stats["total_triggers"] / max(stats["evaluatable_evals"], 1), 4
     )
     stats["last_eval"] = datetime.now(timezone.utc).isoformat()
 
@@ -533,7 +542,9 @@ def evaluate_system(system: dict, prices_by_pane: dict[int, dict]) -> list[dict]
             results.append({"rule_id": rule.id, "skip": "no price data for pane"})
             continue
 
-        prev = {"close": rule.state["prev_value"]} if rule.state["prev_value"] else None
+        prev = rule.state.get("last_price") or (
+            {"close": rule.state["prev_value"]} if rule.state.get("prev_value") else None
+        )
         triggered = rule.check(price, prev)
         rule.update(triggered, price)
 

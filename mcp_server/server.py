@@ -19,6 +19,10 @@ from rules_engine import (
 _active_systems: list[dict] = []
 _active_panes:   list[dict] = []
 
+# Background watch task
+_watch_task: Optional[asyncio.Task] = None
+_watch_interval: int = 0
+
 mcp = FastMCP("tradingview")
 
 RULES_FILE = Path(__file__).parent.parent / "rules.json"
@@ -62,7 +66,14 @@ async def _navigate(page, symbol: str, tf: str):
     code = TF_CODES.get(tf, "D")
     url  = f"{TV_CHART}?symbol={symbol}&interval={code}"
     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-    await page.wait_for_timeout(2500)
+    # Poll until title contains a real price (not TV's splash title).
+    # TV sets title to "SYMBOL PRICE ..." once chart renders — typically <2s.
+    ticker_root = symbol.split(":")[-1]  # "NASDAQ:AAPL" → "AAPL"
+    for _ in range(30):                  # max 6s (30 × 200ms)
+        title = await page.title()
+        if ticker_root in title and any(ch.isdigit() for ch in title):
+            break
+        await page.wait_for_timeout(200)
 
 
 async def _parse_title(page) -> dict:
@@ -329,7 +340,12 @@ async def evaluate_rules(system_name: Optional[str] = None) -> list:
             page   = await ensure_tv(i)
             ticker = await _parse_title(page)
             ohlcv  = await _read_ohlcv(page)
-            return i, {**ticker, **ohlcv}
+            combined = {**ticker, **ohlcv}
+            # Fallback: if OHLCV empty, inject title price as close so rules can still fire
+            if not ohlcv and ticker.get("price"):
+                combined["close"] = ticker["price"]
+                combined["open"]  = ticker["price"]
+            return i, combined
         except Exception:
             return i, {}
 
@@ -386,6 +402,56 @@ async def reload_systems() -> str:
         return "no systems loaded"
     names = [s["name"] for s in _active_systems]
     return await load_systems(names)
+
+
+@mcp.tool()
+async def start_watch(interval_seconds: int = 30) -> str:
+    """
+    Start background rule evaluation loop. Runs evaluate_rules() every N seconds.
+    Logs triggered rules to stdout. Replaces any running watch.
+    interval_seconds: 5–3600 (default 30)
+    """
+    global _watch_task, _watch_interval
+    interval_seconds = max(5, min(3600, interval_seconds))
+
+    async def _loop():
+        while True:
+            try:
+                results = await evaluate_rules()
+                triggered = [r for r in results if r.get("triggered")]
+                if triggered:
+                    for r in triggered:
+                        print(f"[WATCH] TRIGGERED {r['rule_id']} | {r['symbol']} | {r['condition']} | val={r['value']}", flush=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[WATCH] error: {e}", flush=True)
+            await asyncio.sleep(interval_seconds)
+
+    if _watch_task and not _watch_task.done():
+        _watch_task.cancel()
+    _watch_interval = interval_seconds
+    _watch_task = asyncio.create_task(_loop())
+    return f"watch started — interval={interval_seconds}s | systems={[s['name'] for s in _active_systems]}"
+
+
+@mcp.tool()
+async def stop_watch() -> str:
+    """Stop the background rule evaluation loop."""
+    global _watch_task, _watch_interval
+    if _watch_task and not _watch_task.done():
+        _watch_task.cancel()
+        _watch_task = None
+        _watch_interval = 0
+        return "watch stopped"
+    return "no watch running"
+
+
+@mcp.tool()
+async def watch_status() -> dict:
+    """Check if background watch is running and its interval."""
+    running = bool(_watch_task and not _watch_task.done())
+    return {"running": running, "interval_seconds": _watch_interval if running else None}
 
 
 if __name__ == "__main__":
