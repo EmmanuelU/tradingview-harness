@@ -1,0 +1,8 @@
+{
+  "panes": [
+    {"symbol": "NASDAQ:AAPL",     "tf": "1D"},
+    {"symbol": "BINANCE:BTCUSDT", "tf": "4h"},
+    {"symbol": "FX:EURUSD",       "tf": "1h"}
+  ],
+  "last_applied": null
+}

@@ -1,0 +1,12 @@
+[project]
+name = "crackincorrelationprofiler"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "playwright>=1.44.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

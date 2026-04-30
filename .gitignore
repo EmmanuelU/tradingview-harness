@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Playwright / Chrome
+~/.crackincorrelation/
+
+# Screenshots (runtime artifacts)
+*.png
+
+# Local Claude settings (personal permissions)
+.claude/settings.local.json
+
+# Rules are runtime state — commit your own or use rules.example.json
+# rules.json
+
+# OS
+.DS_Store
