@@ -20,5 +20,8 @@ build/
 # Rules are runtime state — commit your own or use rules.example.json
 # rules.json
 
+# Simulation trade log (runtime artifact — personal, not shared)
+sim_log.jsonl
+
 # OS
 .DS_Store

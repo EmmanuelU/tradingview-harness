@@ -28,6 +28,15 @@ _watch_interval: int = 0
 mcp = FastMCP("tradingview")
 
 RULES_FILE = Path(__file__).parent.parent / "rules.json"
+SIM_LOG    = Path(__file__).parent.parent / "sim_log.jsonl"
+
+
+def _log_trade(entry: dict):
+    try:
+        with SIM_LOG.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
 
 
 # ── persistence ────────────────────────────────────────────────────────────────
@@ -442,6 +451,7 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
             qty       = float(parts[1]) if len(parts) > 1 else 1.0
             pane_data = _active_panes[r["pane"]] if r["pane"] < len(_active_panes) else {}
             tv_symbol = pane_data.get("symbol", r["symbol"])
+            sym_short = tv_symbol.split(":")[-1]
 
             if verb not in ("buy", "sell"):
                 continue
@@ -450,12 +460,26 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
             try:
                 page = await _ensure_tv(r["pane"])
                 if not await is_logged_in(page):
-                    print(f"[WATCH] SKIP {verb} {tv_symbol} — TV session expired, login required", flush=True)
+                    print(f"[WATCH] SKIP {verb} {tv_symbol} — TV session expired", flush=True)
                     continue
             except Exception as e:
                 print(f"[WATCH] SKIP {verb} {tv_symbol} — page check failed: {e}", flush=True)
                 continue
 
+            # Position guard — no double-buy, no selling flat
+            try:
+                positions = await paper_tv.get_positions(r["pane"])
+                has_pos   = any(sym_short in (row[0] or "") for row in positions)
+                if verb == "buy" and has_pos:
+                    print(f"[WATCH] SKIP BUY {tv_symbol} — already in position", flush=True)
+                    continue
+                if verb == "sell" and not has_pos:
+                    print(f"[WATCH] SKIP SELL {tv_symbol} — no position to close", flush=True)
+                    continue
+            except Exception as e:
+                print(f"[WATCH] position check failed: {e} — proceeding anyway", flush=True)
+
+            ts     = datetime.now(timezone.utc).isoformat()
             result = await paper_tv.place_order(tv_symbol, verb, qty, r["pane"])
             status = "✓" if result.get("ok") else "✗"
             print(
@@ -463,6 +487,12 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
                 f"| {result.get('button_text') or result.get('error','')}",
                 flush=True,
             )
+            _log_trade({
+                "ts": ts, "rule_id": r["rule_id"], "symbol": tv_symbol,
+                "side": verb, "qty": qty, "value": r.get("value"),
+                "ok": result.get("ok"), "button_text": result.get("button_text"),
+                "error": result.get("error"),
+            })
             if not result.get("ok"):
                 print(f"[WATCH] ORDER FAILED: {result}", flush=True)
 
@@ -537,6 +567,31 @@ async def watch_status() -> dict:
     """Check if background watch is running and its interval."""
     running = bool(_watch_task and not _watch_task.done())
     return {"running": running, "interval_seconds": _watch_interval if running else None}
+
+
+@mcp.tool()
+async def get_sim_log(last_n: int = 20) -> list:
+    """
+    Read last N trade entries from sim_log.jsonl. Persists across restarts.
+    Returns list of {ts, rule_id, symbol, side, qty, value, ok, button_text, error}.
+    """
+    try:
+        lines = SIM_LOG.read_text().strip().split("\n")
+        return [json.loads(l) for l in lines[-last_n:] if l.strip()]
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def clear_sim_log() -> str:
+    """Wipe sim_log.jsonl. Use before a fresh simulation run."""
+    try:
+        SIM_LOG.write_text("")
+        return "sim_log cleared"
+    except Exception as e:
+        return f"error: {e}"
 
 
 # ── paper trading DOM probe ────────────────────────────────────────────────────
