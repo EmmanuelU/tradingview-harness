@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "example_momentum",
   "description": "Simple momentum rules \u2014 close vs open, price thresholds",
   "panes": [
@@ -18,92 +18,118 @@
       "name": "AAPL close above open (green candle)",
       "pane_symbol": "NASDAQ:AAPL",
       "pane_tf": "1D",
-      "condition": {
-        "field": "close",
-        "op": ">",
-        "field2": "open"
-      },
       "actions": [
         "log",
         "alert"
       ],
+      "cooldown_evals": 0,
+      "_cooldown_remaining": 0,
       "state": {
         "triggered": true,
         "last_value": 270.22,
-        "prev_value": null,
-        "trigger_count": 1,
-        "last_triggered": "2026-04-30T03:13:45.200575+00:00",
-        "last_checked": "2026-04-30T03:13:45.200552+00:00",
+        "prev_value": 270.22,
+        "trigger_count": 2,
+        "last_triggered": "2026-04-30T03:45:21.479843+00:00",
+        "last_checked": "2026-04-30T03:45:21.479843+00:00",
         "history": [
           {
             "ts": "2026-04-30T03:13:45.200580+00:00",
             "value": 270.22,
             "triggered": true
+          },
+          {
+            "ts": "2026-04-30T03:45:21.479843+00:00",
+            "value": 270.22,
+            "triggered": true
           }
         ]
       },
-      "_pane_index": 0
+      "condition": {
+        "field": "close",
+        "op": ">",
+        "field2": "open"
+      }
     },
     {
       "id": "aapl_above_270",
       "name": "AAPL price above 270",
       "pane_symbol": "NASDAQ:AAPL",
       "pane_tf": "1D",
-      "condition": {
-        "field": "close",
-        "op": ">",
-        "value": 270
-      },
       "actions": [
         "log"
       ],
+      "cooldown_evals": 0,
+      "_cooldown_remaining": 0,
       "state": {
         "triggered": true,
         "last_value": 270.22,
-        "prev_value": null,
-        "trigger_count": 1,
-        "last_triggered": "2026-04-30T03:13:45.200607+00:00",
-        "last_checked": "2026-04-30T03:13:45.200601+00:00",
+        "prev_value": 270.22,
+        "trigger_count": 2,
+        "last_triggered": "2026-04-30T03:45:21.479924+00:00",
+        "last_checked": "2026-04-30T03:45:21.479924+00:00",
         "history": [
           {
             "ts": "2026-04-30T03:13:45.200613+00:00",
             "value": 270.22,
             "triggered": true
+          },
+          {
+            "ts": "2026-04-30T03:45:21.479924+00:00",
+            "value": 270.22,
+            "triggered": true
           }
         ]
       },
-      "_pane_index": 0
+      "condition": {
+        "field": "close",
+        "op": ">",
+        "value": 270
+      }
     },
     {
       "id": "btc_above_75k",
       "name": "BTC above 75,000",
       "pane_symbol": "BINANCE:BTCUSDT",
       "pane_tf": "4h",
-      "condition": {
-        "field": "close",
-        "op": ">",
-        "value": 75000
-      },
       "actions": [
         "log",
         "alert"
       ],
+      "cooldown_evals": 0,
+      "_cooldown_remaining": 0,
       "state": {
-        "triggered": false,
-        "last_value": 68168.1,
-        "prev_value": null,
-        "trigger_count": 0,
-        "last_triggered": null,
-        "last_checked": "2026-04-30T03:13:45.200631+00:00",
+        "triggered": true,
+        "last_value": 75944.47,
+        "prev_value": 68168.1,
+        "trigger_count": 1,
+        "last_triggered": "2026-04-30T03:45:21.480000+00:00",
+        "last_checked": "2026-04-30T03:45:21.480000+00:00",
         "history": [
           {
             "ts": "2026-04-30T03:13:45.200634+00:00",
             "value": 68168.1,
             "triggered": false
+          },
+          {
+            "ts": "2026-04-30T03:45:21.480000+00:00",
+            "value": 75944.47,
+            "triggered": true
           }
         ]
       },
-      "_pane_index": 1
+      "condition": {
+        "field": "close",
+        "op": ">",
+        "value": 75000
+      }
     }
-  ]
+  ],
+  "stats": {
+    "eval_count": 1,
+    "total_triggers": 3,
+    "skipped": 0,
+    "trigger_rate": 1.0,
+    "last_eval": "2026-04-30T03:45:21.480061+00:00",
+    "evaluatable_evals": 3
+  }
 }

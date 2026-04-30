@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "name": "example_levels",
   "description": "Key level watches across assets",
   "panes": [
@@ -18,92 +18,118 @@
       "name": "AAPL breakdown below 260",
       "pane_symbol": "NASDAQ:AAPL",
       "pane_tf": "1D",
-      "condition": {
-        "field": "close",
-        "op": "<",
-        "value": 260
-      },
       "actions": [
         "log",
         "alert",
         "screenshot"
       ],
+      "cooldown_evals": 0,
+      "_cooldown_remaining": 0,
       "state": {
         "triggered": false,
         "last_value": 270.22,
-        "prev_value": null,
+        "prev_value": 270.22,
         "trigger_count": 0,
         "last_triggered": null,
-        "last_checked": "2026-04-30T03:13:45.205660+00:00",
+        "last_checked": "2026-04-30T03:45:21.464490+00:00",
         "history": [
           {
             "ts": "2026-04-30T03:13:45.205741+00:00",
             "value": 270.22,
             "triggered": false
+          },
+          {
+            "ts": "2026-04-30T03:45:21.464490+00:00",
+            "value": 270.22,
+            "triggered": false
           }
         ]
       },
-      "_pane_index": 0
+      "condition": {
+        "field": "close",
+        "op": "<",
+        "value": 260
+      }
     },
     {
       "id": "eurusd_above_1_17",
       "name": "EURUSD above 1.17",
       "pane_symbol": "FX:EURUSD",
       "pane_tf": "1h",
-      "condition": {
-        "field": "close",
-        "op": ">",
-        "value": 1.17
-      },
       "actions": [
         "log"
       ],
+      "cooldown_evals": 0,
+      "_cooldown_remaining": 0,
       "state": {
-        "triggered": true,
-        "last_value": 1.17515,
-        "prev_value": null,
+        "triggered": false,
+        "last_value": 1.16665,
+        "prev_value": 1.17515,
         "trigger_count": 1,
         "last_triggered": "2026-04-30T03:13:45.205816+00:00",
-        "last_checked": "2026-04-30T03:13:45.205799+00:00",
+        "last_checked": "2026-04-30T03:45:21.464705+00:00",
         "history": [
           {
             "ts": "2026-04-30T03:13:45.205826+00:00",
             "value": 1.17515,
             "triggered": true
+          },
+          {
+            "ts": "2026-04-30T03:45:21.464705+00:00",
+            "value": 1.16665,
+            "triggered": false
           }
         ]
       },
-      "_pane_index": 2
+      "condition": {
+        "field": "close",
+        "op": ">",
+        "value": 1.17
+      }
     },
     {
       "id": "aapl_wick_rejection",
       "name": "AAPL high > close + 2 (upper wick)",
       "pane_symbol": "NASDAQ:AAPL",
       "pane_tf": "1D",
-      "condition": {
-        "field": "high",
-        "op": ">",
-        "value": 272
-      },
       "actions": [
         "log"
       ],
+      "cooldown_evals": 0,
+      "_cooldown_remaining": 0,
       "state": {
         "triggered": false,
         "last_value": 271.04,
-        "prev_value": null,
+        "prev_value": 271.04,
         "trigger_count": 0,
         "last_triggered": null,
-        "last_checked": "2026-04-30T03:13:45.205883+00:00",
+        "last_checked": "2026-04-30T03:45:21.464833+00:00",
         "history": [
           {
             "ts": "2026-04-30T03:13:45.205900+00:00",
             "value": 271.04,
             "triggered": false
+          },
+          {
+            "ts": "2026-04-30T03:45:21.464833+00:00",
+            "value": 271.04,
+            "triggered": false
           }
         ]
       },
-      "_pane_index": 0
+      "condition": {
+        "field": "high",
+        "op": ">",
+        "value": 272
+      }
     }
-  ]
+  ],
+  "stats": {
+    "eval_count": 1,
+    "total_triggers": 0,
+    "skipped": 0,
+    "trigger_rate": 0.0,
+    "last_eval": "2026-04-30T03:45:21.466489+00:00",
+    "evaluatable_evals": 3
+  }
 }

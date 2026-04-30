@@ -5,13 +5,13 @@
       "tf": "1D"
     },
     {
-      "symbol": "BINANCE:BTCUSDT",
-      "tf": "4h"
-    },
-    {
       "symbol": "FX:EURUSD",
       "tf": "1h"
+    },
+    {
+      "symbol": "BINANCE:BTCUSDT",
+      "tf": "4h"
     }
   ],
-  "last_applied": "2026-04-30T02:49:30.124605+00:00"
+  "last_applied": "2026-04-30T04:01:22.575538+00:00"
 }
