@@ -313,7 +313,8 @@ async def load_systems(names: Optional[list] = None) -> str:
 @mcp.tool()
 async def evaluate_rules(system_name: Optional[str] = None) -> list:
     """
-    Evaluate all rules against live DOM prices. Saves state back to system files.
+    Evaluate all rules against live DOM prices. Each system runs independently.
+    Prices fetched in parallel across all panes. Saves state back to system files.
     system_name: evaluate one system only — or omit for all loaded systems.
     Returns list of rule results with triggered status.
     """
@@ -322,22 +323,23 @@ async def evaluate_rules(system_name: Optional[str] = None) -> list:
     if not _active_systems:
         return [{"error": "no systems loaded — call load_systems first"}]
 
-    # Read live prices from all panes
-    prices_by_pane: dict[int, dict] = {}
-    for i in range(len(_active_panes)):
+    # Fetch all pane prices in parallel — one read per tab, zero blocking
+    async def _fetch_pane(i: int) -> tuple[int, dict]:
         try:
             page   = await ensure_tv(i)
             ticker = await _parse_title(page)
             ohlcv  = await _read_ohlcv(page)
-            prices_by_pane[i] = {**ticker, **ohlcv}
-        except Exception as e:
-            prices_by_pane[i] = {}
+            return i, {**ticker, **ohlcv}
+        except Exception:
+            return i, {}
 
-    # Evaluate
+    fetched = await asyncio.gather(*[_fetch_pane(i) for i in range(len(_active_panes))])
+    prices_by_pane: dict[int, dict] = dict(fetched)
+
+    # Each system evaluates independently — isolated state, no cross-contamination
+    target = [s for s in _active_systems if not system_name or s["name"] == system_name]
     all_results = []
-    for sys in _active_systems:
-        if system_name and sys["name"] != system_name:
-            continue
+    for sys in target:
         results = evaluate_system(sys, prices_by_pane)
         save_system(sys)
         all_results.extend(results)
