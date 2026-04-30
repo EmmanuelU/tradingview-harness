@@ -31,45 +31,139 @@ _sim_positions: dict[str, float] = {}
 
 mcp = FastMCP("tradingview")
 
-RULES_FILE = Path(__file__).parent.parent / "rules.json"
-SIM_LOG    = Path(__file__).parent.parent / "sim_log.jsonl"
+ROOT       = Path(__file__).parent.parent
+RULES_FILE = ROOT / "rules.json"
+SIM_LOG    = ROOT / "sim_log.jsonl"
+PRICE_LOG  = ROOT / "price_log.jsonl"
+PNL_LOG    = ROOT / "pnl_log.jsonl"
+EVENT_LOG  = ROOT / "event_log.jsonl"
+RULE_SCORES = ROOT / "rule_scores.json"
+
+# FIFO open-entry tracker: sym_short → [{ts, qty, fill_price, rule_id}]
+_sim_entries: dict[str, list[dict]] = {}
+
+
+def _append_jsonl(path: Path, obj: dict):
+    try:
+        with path.open("a") as f:
+            f.write(json.dumps(obj) + "\n")
+    except Exception:
+        pass
+
+
+def _log_trade(entry: dict):
+    _append_jsonl(SIM_LOG, entry)
+
+
+def _log_price(pane: int, symbol: str, tf: str, price: dict):
+    _append_jsonl(PRICE_LOG, {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "pane": pane, "symbol": symbol, "tf": tf,
+        **{k: price.get(k) for k in ("price", "open", "high", "low", "close", "direction", "change")},
+    })
+
+
+def _log_event(event: str, detail: str = ""):
+    _append_jsonl(EVENT_LOG, {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event, "detail": str(detail),
+    })
+
+
+def _update_rule_scores(entry_rule: str, pnl: float):
+    try:
+        scores: dict = json.loads(RULE_SCORES.read_text()) if RULE_SCORES.exists() else {}
+        s = scores.setdefault(entry_rule, {
+            "trades": 0, "wins": 0, "losses": 0,
+            "total_pnl": 0.0, "avg_pnl": 0.0, "win_rate": 0.0,
+        })
+        s["trades"]    += 1
+        s["total_pnl"]  = round(s["total_pnl"] + pnl, 6)
+        s["wins"]      += 1 if pnl > 0 else 0
+        s["losses"]    += 1 if pnl <= 0 else 0
+        s["avg_pnl"]    = round(s["total_pnl"] / s["trades"], 6)
+        s["win_rate"]   = round(s["wins"] / s["trades"], 4)
+        RULE_SCORES.write_text(json.dumps(scores, indent=2))
+    except Exception as e:
+        print(f"[SIM] rule_scores error: {e}", flush=True)
+
+
+def _compute_and_log_pnl(sym_short: str, tv_symbol: str, qty: float,
+                          exit_price: float | None, exit_rule: str):
+    if not exit_price:
+        return
+    entries = _sim_entries.get(sym_short, [])
+    remaining = qty
+    while remaining > 0 and entries:
+        e = entries[0]
+        used = min(e["qty"], remaining)
+        if e.get("fill_price"):
+            pnl     = round((exit_price - e["fill_price"]) * used, 6)
+            pnl_pct = round((exit_price - e["fill_price"]) / e["fill_price"] * 100, 4)
+            _append_jsonl(PNL_LOG, {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "symbol": tv_symbol, "qty": used,
+                "entry_price": e["fill_price"], "exit_price": exit_price,
+                "pnl": pnl, "pnl_pct": pnl_pct,
+                "entry_rule": e["rule_id"], "exit_rule": exit_rule,
+                "entry_ts": e["ts"],
+            })
+            _update_rule_scores(e["rule_id"], pnl)
+        e["qty"] -= used
+        remaining -= used
+        if e["qty"] <= 0:
+            entries.pop(0)
+    if entries:
+        _sim_entries[sym_short] = entries
+    else:
+        _sim_entries.pop(sym_short, None)
 
 
 def _reconcile_positions():
-    """Rebuild _sim_positions from sim_log.jsonl. Called on start_watch to survive restarts."""
-    global _sim_positions
+    """Rebuild _sim_positions + _sim_entries from sim_log. Called on start_watch."""
+    global _sim_positions, _sim_entries
     _sim_positions = {}
+    _sim_entries   = {}
     try:
         lines = SIM_LOG.read_text().strip().split("\n")
         for line in lines:
             if not line.strip():
                 continue
-            entry = json.loads(line)
-            if not entry.get("ok"):
+            rec  = json.loads(line)
+            if not rec.get("ok"):
                 continue
-            sym  = entry["symbol"].split(":")[-1]
-            side = entry.get("side", "")
-            qty  = float(entry.get("qty", 1))
+            sym  = rec["symbol"].split(":")[-1]
+            side = rec.get("side", "")
+            qty  = float(rec.get("qty", 1))
             if side == "buy":
                 _sim_positions[sym] = _sim_positions.get(sym, 0.0) + qty
+                _sim_entries.setdefault(sym, []).append({
+                    "ts": rec["ts"], "qty": qty,
+                    "fill_price": rec.get("fill_price"),
+                    "rule_id": rec.get("rule_id"),
+                })
             elif side == "sell":
                 held = max(0.0, _sim_positions.get(sym, 0.0) - qty)
                 if held == 0.0:
                     _sim_positions.pop(sym, None)
                 else:
                     _sim_positions[sym] = held
+                rem = qty
+                ents = _sim_entries.get(sym, [])
+                while rem > 0 and ents:
+                    used = min(ents[0]["qty"], rem)
+                    ents[0]["qty"] -= used
+                    rem -= used
+                    if ents[0]["qty"] <= 0:
+                        ents.pop(0)
+                if ents:
+                    _sim_entries[sym] = ents
+                else:
+                    _sim_entries.pop(sym, None)
     except FileNotFoundError:
         pass
     except Exception as e:
         print(f"[SIM] reconcile error: {e}", flush=True)
-
-
-def _log_trade(entry: dict):
-    try:
-        with SIM_LOG.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
 
 
 # ── persistence ────────────────────────────────────────────────────────────────
@@ -396,6 +490,12 @@ async def evaluate_rules(system_name: Optional[str] = None) -> list:
     fetched = await asyncio.gather(*[_fetch_pane(i) for i in range(len(_active_panes))])
     prices_by_pane: dict[int, dict] = dict(fetched)
 
+    # Persist every tick — foundation for backtest + P&L analysis
+    for i, price in prices_by_pane.items():
+        if price and i < len(_active_panes):
+            p = _active_panes[i]
+            _log_price(i, p["symbol"], p["tf"], price)
+
     # Each system evaluates independently — isolated state, no cross-contamination
     target = [s for s in _active_systems if not system_name or s["name"] == system_name]
     all_results = []
@@ -504,10 +604,13 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
             try:
                 page = await _ensure_tv(r["pane"])
                 if not await is_logged_in(page):
+                    msg = f"TV session expired — skipping {verb} {tv_symbol}"
                     print(f"[WATCH] SKIP {verb} {tv_symbol} — TV session expired", flush=True)
+                    _log_event("login_expired", msg)
                     continue
             except Exception as e:
                 print(f"[WATCH] SKIP {verb} {tv_symbol} — page check failed: {e}", flush=True)
+                _log_event("page_check_failed", f"{verb} {tv_symbol}: {e}")
                 continue
 
             # Position guard — in-memory, no DOM dependency
@@ -539,7 +642,11 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
             if result.get("ok"):
                 if verb == "buy":
                     _sim_positions[sym_short] = _sim_positions.get(sym_short, 0.0) + qty
+                    _sim_entries.setdefault(sym_short, []).append({
+                        "ts": ts, "qty": qty, "fill_price": fill_price, "rule_id": r["rule_id"],
+                    })
                 elif verb == "sell":
+                    _compute_and_log_pnl(sym_short, tv_symbol, qty, fill_price, r["rule_id"])
                     held = max(0.0, _sim_positions.get(sym_short, 0.0) - qty)
                     if held == 0.0:
                         _sim_positions.pop(sym_short, None)
@@ -564,6 +671,7 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
         nonlocal _consecutive_errors
         _reconcile_positions()   # rebuild from sim_log on every (re)start
         print(f"[WATCH] positions reconciled: {_sim_positions}", flush=True)
+        _log_event("watch_start", f"interval={interval_seconds}s auto_trade={auto_trade} systems={[s['name'] for s in _active_systems]}")
         while True:
             try:
                 # Dismiss any TV popups that could block DOM reads
@@ -591,19 +699,24 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
                             print(f"[WATCH] execute error: {e}", flush=True)
 
             except asyncio.CancelledError:
+                _log_event("watch_stop", "cancelled")
                 raise
             except Exception as e:
                 _consecutive_errors += 1
                 print(f"[WATCH] error ({_consecutive_errors}/{MAX_CONSECUTIVE}): {e}", flush=True)
+                _log_event("watch_error", f"({_consecutive_errors}/{MAX_CONSECUTIVE}): {e}")
 
                 if _consecutive_errors >= MAX_CONSECUTIVE:
                     print("[WATCH] threshold reached — recovering Chrome...", flush=True)
+                    _log_event("chrome_recovery_start", f"after {_consecutive_errors} errors")
                     recovered = await _recover_chrome()
                     if recovered:
                         _consecutive_errors = 0
                         print("[WATCH] recovered — resuming", flush=True)
+                        _log_event("chrome_recovery_ok", "")
                     else:
                         print("[WATCH] recovery failed — sleeping 60s before retry", flush=True)
+                        _log_event("chrome_recovery_failed", "sleeping 60s")
                         await asyncio.sleep(60)
 
             await asyncio.sleep(interval_seconds)
@@ -665,6 +778,68 @@ async def clear_sim_log() -> str:
         return "sim_log cleared"
     except Exception as e:
         return f"error: {e}"
+
+
+@mcp.tool()
+async def get_price_log(last_n: int = 20, symbol: Optional[str] = None) -> list:
+    """
+    Read last N price ticks from price_log.jsonl.
+    symbol: filter to one symbol e.g. 'NASDAQ:AAPL' (optional)
+    """
+    try:
+        lines = [l for l in PRICE_LOG.read_text().strip().split("\n") if l.strip()]
+        entries = [json.loads(l) for l in lines]
+        if symbol:
+            entries = [e for e in entries if e.get("symbol") == symbol]
+        return entries[-last_n:]
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def get_pnl_log(last_n: int = 20) -> list:
+    """
+    Read realized P&L entries from pnl_log.jsonl.
+    Each entry: {ts, symbol, qty, entry_price, exit_price, pnl, pnl_pct, entry_rule, exit_rule, entry_ts}
+    """
+    try:
+        lines = [l for l in PNL_LOG.read_text().strip().split("\n") if l.strip()]
+        return [json.loads(l) for l in lines[-last_n:]]
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
+@mcp.tool()
+async def get_rule_scores() -> dict:
+    """
+    Aggregate P&L performance per rule from rule_scores.json.
+    Shows: trades, wins, losses, total_pnl, avg_pnl, win_rate per rule.
+    """
+    try:
+        return json.loads(RULE_SCORES.read_text())
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_event_log(last_n: int = 30) -> list:
+    """
+    Read last N system events from event_log.jsonl.
+    Events: watch_start/stop, watch_error, chrome_recovery_*, login_expired, page_check_failed.
+    """
+    try:
+        lines = [l for l in EVENT_LOG.read_text().strip().split("\n") if l.strip()]
+        return [json.loads(l) for l in lines[-last_n:]]
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        return [{"error": str(e)}]
 
 
 # ── paper trading DOM probe ────────────────────────────────────────────────────
