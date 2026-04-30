@@ -25,10 +25,43 @@ _active_panes:   list[dict] = []
 _watch_task: Optional[asyncio.Task] = None
 _watch_interval: int = 0
 
+# In-memory position tracker: short_symbol → qty held
+# Updated on every successful order. Reconciled from sim_log on start_watch.
+_sim_positions: dict[str, float] = {}
+
 mcp = FastMCP("tradingview")
 
 RULES_FILE = Path(__file__).parent.parent / "rules.json"
 SIM_LOG    = Path(__file__).parent.parent / "sim_log.jsonl"
+
+
+def _reconcile_positions():
+    """Rebuild _sim_positions from sim_log.jsonl. Called on start_watch to survive restarts."""
+    global _sim_positions
+    _sim_positions = {}
+    try:
+        lines = SIM_LOG.read_text().strip().split("\n")
+        for line in lines:
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if not entry.get("ok"):
+                continue
+            sym  = entry["symbol"].split(":")[-1]
+            side = entry.get("side", "")
+            qty  = float(entry.get("qty", 1))
+            if side == "buy":
+                _sim_positions[sym] = _sim_positions.get(sym, 0.0) + qty
+            elif side == "sell":
+                held = max(0.0, _sim_positions.get(sym, 0.0) - qty)
+                if held == 0.0:
+                    _sim_positions.pop(sym, None)
+                else:
+                    _sim_positions[sym] = held
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[SIM] reconcile error: {e}", flush=True)
 
 
 def _log_trade(entry: dict):
@@ -267,6 +300,17 @@ async def list_panes() -> dict:
 
 
 @mcp.tool()
+async def dismiss_popups(pane: int = 0) -> dict:
+    """
+    Manually dismiss TV announcement/modal popups on a pane.
+    Called automatically each watch cycle and before every paper order.
+    """
+    page = await ensure_tv(pane)
+    dismissed = await tv_utils.dismiss_popups(page)
+    return {"pane": pane, "dismissed": dismissed}
+
+
+@mcp.tool()
 async def get_status() -> str:
     """Quick health check: tab count + saved layout."""
     data  = _load_rules()
@@ -466,18 +510,14 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
                 print(f"[WATCH] SKIP {verb} {tv_symbol} — page check failed: {e}", flush=True)
                 continue
 
-            # Position guard — no double-buy, no selling flat
-            try:
-                positions = await paper_tv.get_positions(r["pane"])
-                has_pos   = any(sym_short in (row[0] or "") for row in positions)
-                if verb == "buy" and has_pos:
-                    print(f"[WATCH] SKIP BUY {tv_symbol} — already in position", flush=True)
-                    continue
-                if verb == "sell" and not has_pos:
-                    print(f"[WATCH] SKIP SELL {tv_symbol} — no position to close", flush=True)
-                    continue
-            except Exception as e:
-                print(f"[WATCH] position check failed: {e} — proceeding anyway", flush=True)
+            # Position guard — in-memory, no DOM dependency
+            held = _sim_positions.get(sym_short, 0.0)
+            if verb == "buy" and held > 0:
+                print(f"[WATCH] SKIP BUY {tv_symbol} — already holding {held}", flush=True)
+                continue
+            if verb == "sell" and held == 0:
+                print(f"[WATCH] SKIP SELL {tv_symbol} — no position to close", flush=True)
+                continue
 
             ts     = datetime.now(timezone.utc).isoformat()
             result = await paper_tv.place_order(tv_symbol, verb, qty, r["pane"])
@@ -487,9 +527,28 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
                 f"| {result.get('button_text') or result.get('error','')}",
                 flush=True,
             )
+            # Parse fill price from button_text: "Buy\n1 AAPL @ 270.22 LIMIT"
+            fill_price = None
+            btn = result.get("button_text") or ""
+            if " @ " in btn:
+                try:
+                    fill_price = float(btn.split(" @ ")[1].split()[0].replace(",", ""))
+                except Exception:
+                    pass
+
+            if result.get("ok"):
+                if verb == "buy":
+                    _sim_positions[sym_short] = _sim_positions.get(sym_short, 0.0) + qty
+                elif verb == "sell":
+                    held = max(0.0, _sim_positions.get(sym_short, 0.0) - qty)
+                    if held == 0.0:
+                        _sim_positions.pop(sym_short, None)
+                    else:
+                        _sim_positions[sym_short] = held
             _log_trade({
                 "ts": ts, "rule_id": r["rule_id"], "symbol": tv_symbol,
-                "side": verb, "qty": qty, "value": r.get("value"),
+                "side": verb, "qty": qty, "signal_value": r.get("value"),
+                "fill_price": fill_price,
                 "ok": result.get("ok"), "button_text": result.get("button_text"),
                 "error": result.get("error"),
             })
@@ -503,8 +562,18 @@ async def start_watch(interval_seconds: int = 30, auto_trade: bool = False) -> s
 
     async def _loop():
         nonlocal _consecutive_errors
+        _reconcile_positions()   # rebuild from sim_log on every (re)start
+        print(f"[WATCH] positions reconciled: {_sim_positions}", flush=True)
         while True:
             try:
+                # Dismiss any TV popups that could block DOM reads
+                for i in range(len(_active_panes)):
+                    try:
+                        page = await ensure_tv(i)
+                        await tv_utils.dismiss_popups(page)
+                    except Exception:
+                        pass
+
                 results = await evaluate_rules()
                 _consecutive_errors = 0   # reset on success
 
@@ -564,9 +633,13 @@ async def stop_watch() -> str:
 
 @mcp.tool()
 async def watch_status() -> dict:
-    """Check if background watch is running and its interval."""
+    """Check if background watch is running, interval, and current sim positions."""
     running = bool(_watch_task and not _watch_task.done())
-    return {"running": running, "interval_seconds": _watch_interval if running else None}
+    return {
+        "running": running,
+        "interval_seconds": _watch_interval if running else None,
+        "sim_positions": dict(_sim_positions),
+    }
 
 
 @mcp.tool()

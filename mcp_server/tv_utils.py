@@ -1,5 +1,14 @@
 """TV navigation + DOM read utilities. No imports from server.py — safe for paper_tv."""
 
+# Common TV popup close selectors — data-name/aria only (no class hashes)
+_POPUP_CLOSE_SELS = [
+    "[data-name='close-button']",
+    "[data-name='dialog-close-button']",
+    "button[aria-label='Close']",
+    "button[aria-label='close']",
+    "[data-name='notification-close-button']",
+]
+
 TV_CHART = "https://www.tradingview.com/chart/"
 
 TF_CODES = {
@@ -7,6 +16,30 @@ TF_CODES = {
     "1h": "60",  "2h": "120", "4h": "240",
     "1D": "D",   "1W": "W",   "1M": "M",
 }
+
+
+async def dismiss_popups(page) -> list[str]:
+    """
+    Dismiss TV announcement/modal popups. Safe to call anytime — no-op if nothing open.
+    Returns list of selectors that matched.
+    """
+    dismissed = []
+    # Escape closes most modal dialogs first
+    try:
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(150)
+    except Exception:
+        pass
+    for sel in _POPUP_CLOSE_SELS:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=200):
+                await el.click(timeout=300)
+                dismissed.append(sel)
+                await page.wait_for_timeout(150)
+        except Exception:
+            pass
+    return dismissed
 
 
 async def navigate(page, symbol: str, tf: str):

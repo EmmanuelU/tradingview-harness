@@ -331,7 +331,8 @@ class Rule:
 
     # ── state update ─────────────────────────────────────────────────────────
 
-    def update(self, triggered: bool | None, price: dict):
+    def update(self, triggered: bool | None, price: dict) -> bool | None:
+        """Update state. Returns post-cooldown triggered value (may differ from input)."""
         s = self.state
         val = self.primary_value(price)
         now = datetime.now(timezone.utc).isoformat()
@@ -342,12 +343,12 @@ class Rule:
         s["last_checked"] = now
 
         if triggered is None:
-            return  # no state change on missing data
+            return None  # no state change on missing data
 
-        # cooldown gate
-        if self._cooldown_remaining > 0:
+        # cooldown gate — suppress re-trigger, return False so caller sees suppression
+        if triggered and self._cooldown_remaining > 0:
             self._cooldown_remaining -= 1
-            triggered = False  # suppress re-trigger during cooldown
+            triggered = False
 
         s["triggered"] = triggered
         if triggered:
@@ -358,6 +359,8 @@ class Rule:
         s["history"].append({"ts": now, "value": val, "triggered": triggered})
         if len(s["history"]) > HISTORY_LIMIT:
             s["history"] = s["history"][-HISTORY_LIMIT:]
+
+        return triggered
 
     def to_dict(self) -> dict:
         """Serialise back to JSON-compatible dict (for saving to system file)."""
@@ -550,8 +553,7 @@ def evaluate_system(system: dict, prices_by_pane: dict[int, dict]) -> list[dict]
         prev = rule.state.get("last_price") or (
             {"close": rule.state["prev_value"]} if rule.state.get("prev_value") else None
         )
-        triggered = rule.check(price, prev)
-        rule.update(triggered, price)
+        triggered = rule.update(rule.check(price, prev), price)  # post-cooldown value
 
         if triggered is None:
             results.append({"rule_id": rule.id, "skip": "insufficient data"})

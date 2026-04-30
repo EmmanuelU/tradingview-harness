@@ -2,7 +2,7 @@
 
 import asyncio
 from browser import ensure_tv
-from tv_utils import navigate as _navigate, parse_title as _parse_title
+from tv_utils import navigate as _navigate, parse_title as _parse_title, dismiss_popups as _dismiss
 
 # Confirmed selectors (probed 2026-04-30)
 SEL_BUY_SIDE   = "[data-name='side-control-buy']"
@@ -16,6 +16,9 @@ SEL_ORDER_TYPE = "[data-name='order-panel']"
 
 async def _ensure_paper_connected(page) -> bool:
     """Connect Paper Trading broker if not already open. Returns True on success."""
+    # Clear any blocking popups first
+    await _dismiss(page)
+
     # Panel is connected if place-and-modify-button is present
     connected = await page.evaluate(
         "() => !!document.querySelector(\"[data-name='place-and-modify-button']\")"
